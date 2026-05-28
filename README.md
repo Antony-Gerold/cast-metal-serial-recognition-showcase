@@ -40,8 +40,8 @@ The full chronological *tried → failed → learned → pivoted* story — dire
 
 ## Read more
 
-- 📄 **[Full report (PDF)](report/MV_Project2_FinalReport.pdf)** — the complete graded submission
-- 🔬 [Methodology](docs/methodology.md) · [Results](docs/results.md) · [References](docs/references.md)
+- **[Full report (PDF)](report/MV_Project2_FinalReport.pdf)** — the complete graded submission
+- [Methodology](docs/methodology.md) · [Results](docs/results.md) · [References](docs/references.md)
 
 ## A note on code
 
