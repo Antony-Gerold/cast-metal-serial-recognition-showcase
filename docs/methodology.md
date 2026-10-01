@@ -1,120 +1,93 @@
 # Methodology
 
+Everything here follows the final report ([PDF](../report/MV_Project2_FinalReport.pdf)), in the order the problem was worked through.
+
 ## 1. Dataset
 
 | Property | Value |
 |---|---|
-| Total images used | 1,872 (of 1,885 available) |
-| Part types | 10 (of 12 — two excluded for too few images) |
-| Resolution | 1288 × 964, grayscale |
-| Class balance | Heavily imbalanced — 13 to 596 images per class |
-| Excluded | `20871905`, `BK21-64842-A-B` (13 images total) |
+| Full dataset | 1,885 grayscale images across 12 part types |
+| Used in this project | 1,872 images across 10 part types |
+| Class balance | Six parts have 96 to 596 images; four parts have only 13 or 14 images each |
+| Excluded | `20871905` and `BK21-64842-A-B` (13 images total), too few for reliable training and testing |
 
-## 2. Region-of-Interest detection
+Each part type has a unique serial number stamped into its surface.
 
-### 2.1 Manual ROI baseline
+## 2. Region of interest
 
-For each part type, the serial-number bounding box is hand-annotated on one reference image and reused for all images of that part. Trivial to implement; requires human setup per new part type.
+### 2.1 Manual ROI calibration
 
-### 2.2 Automatic ROI via MSER
+Open one reference image per part, note the pixel coordinates of the serial number corners, and hard code them. Coordinates were defined for all 10 parts this way. The downside is that every new part type needs human setup.
 
-[Matas et al., 2004] Maximally Stable Extremal Regions detects connected pixel sets that stay stable across a range of intensity thresholds. Three-stage pipeline:
+### 2.2 Automatic ROI with MSER
 
-1. **Candidates.** Run MSER on both the original ROI and its inverse to capture both dark-on-light and light-on-dark characters. Filter by size and aspect ratio to keep character-shaped blobs only.
-2. **Cluster.** Build a 2-D density grid over candidate centroids; the densest cluster is assumed to enclose the serial number.
-3. **Box.** Fit a padded bounding box around the cluster.
+MSER (Maximally Stable Extremal Regions) [6] finds regions that stay stable across a range of intensity thresholds. Three steps:
 
-**Results across the 10 parts:** average recall **0.90**, average IoU **0.13** against the manual ROI. The auto box is consistently 3–10× larger than the true serial-number region. One part (`GM 23477043`) fails completely — MSER candidates cluster in the wrong area.
+1. MSER finds candidate regions on both the original and the inverted image. Candidates are filtered by size and aspect ratio to keep character-shaped blobs.
+2. A density grid clusters the candidates spatially. The densest cluster is assumed to contain the serial number.
+3. A bounding box with some padding is drawn around the cluster.
 
-This was initially flagged as a problem. It later proved not to be — see Section 5.
+Across all 10 parts, the auto ROI achieved an average recall of 90% and an average IoU of 0.13 against the manual ROI. For 9 of 10 parts it captured the serial number region, with 3 to 10 times more background than needed. For part 23477043 the MSER candidates clustered in the wrong area and missed the serial number entirely. The auto ROI was still used for all parts, since 9 of 10 is a reasonable rate for an unsupervised method.
 
-## 3. Preprocessing evolution
+## 3. Preprocessing
 
-### Attempt 1 — Direct thresholding (FAIL)
+### Attempt 1: direct thresholding (fail)
 
-Otsu, adaptive, and manual fixed-threshold binarisation. All three fail because texture bumps occupy the same intensity range as character pixels — thresholding cannot separate signal from noise when both are at the same value.
+Otsu, adaptive, and manual thresholds all failed. The metal texture contains dark and light spots in the same intensity range as the character strokes.
 
-### Attempt 2 — Edge detection (FAIL)
+### Attempt 2: edge detection (fail)
 
-Canny and Sobel on the raw ROI. Texture creates edges everywhere; character edges have no distinguishing magnitude. Drowned out.
+Canny and Sobel both failed. The textured surface is full of edges, and character edges are drowned out.
 
-### Attempt 3 — Gaussian blur before thresholding (PARTIAL)
+### Attempt 3: Gaussian blur before thresholding (partial)
 
-Texture is high-frequency; characters are mid-frequency. Blur should suppress texture preferentially. Tested kernels 3 → 31. Small kernels leave too much texture; large kernels erode characters. No single kernel size cleanly separates the two scales. Blur helps but is insufficient on its own.
+Kernel sizes from 3 to 31 were tested. Small kernels (3 to 7) leave too much texture; large kernels (23+) start degrading the characters. There is a usable range around 11 to 15, but no single kernel perfectly separates texture from characters.
 
-### Attempt 4 — Black top-hat (BREAKTHROUGH)
+### Black top-hat transform
 
-The physical insight: stamps are recessed valleys created by a die pressed into soft metal. Recessed valleys reflect less light → they are dark depressions in the surface. The black top-hat transform extracts exactly that class of feature:
+A die presses into soft metal and creates recessed valleys that reflect less light and appear darker than the surrounding surface. The black top-hat transform [1] extracts exactly these dark features:
 
 $$T_{black}(f) = (f \bullet b) - f$$
 
-where $f$ is the input image and $b$ is a flat structuring element. The morphological closing $f \bullet b$ slides $b$ over the surface and fills the valleys; subtracting the original leaves only what was filled.
+A morphological closing fills the valleys, and subtracting the original leaves only what was filled in, which is the characters. A 25×25 rectangular structuring element was used because character strokes are roughly 5 to 20 pixels wide and the element must be larger than the features being extracted. CLAHE [4] (clipLimit = 3.0, tileGridSize = 8×8) is applied before the top-hat to normalize local contrast under uneven lighting.
 
-**Structuring element:** 25 × 25 rectangle. Sized larger than character strokes (5–20 px) but smaller than the largest texture artefacts. Combined with CLAHE (`clipLimit = 3.0`, `tileGridSize = 8 × 8`) for local contrast normalisation under uneven lighting.
+### Complete preprocessing pipeline
 
-### Final preprocessing chain
+1. Gaussian blur with a per-part kernel size (9 to 25)
+2. CLAHE
+3. Black top-hat, 25×25 kernel
+4. Otsu thresholding [5]
+5. Morphological opening, 3×3 kernel, to remove small noise specks
 
-```
-Gaussian blur (per-part k = 9..25) → CLAHE → Black top-hat (25×25)
-```
+The Otsu step loses information: the grayscale top-hat output keeps the intensity difference between strong character edges and weak texture edges, and binarization removes it.
 
-Two versions exist downstream:
+## 4. Character segmentation (fail)
 
-- **Binarised version** (`+ Otsu + morphological opening`): used for the character-segmentation attempt
-- **Grayscale version**: used for the final holistic classifier
+Connected components on the binary output, filtered by height (>12% of ROI height), width (<18% of ROI width), area (>80 pixels), and aspect ratio (<2.0).
 
-## 4. Character-level approach (FAIL)
+On one reference image per part, only 2 of 10 parts produced blob counts within ±2 of the expected character count. The other 8 produced too many blobs from residual texture noise.
 
-Goal: connected-component analysis on the binarised pipeline output → labelled character crops → HOG + KNN classifier.
+From the parts where segmentation worked, 11 labeled 28×28 character crops were extracted. Most were corrupted by texture noise. Even with data augmentation, a KNN classifier trained on these samples cannot work at scale because the input quality is too poor. Segmentation, not the classifier, is the bottleneck: after Otsu thresholding, characters and texture both become white pixels.
 
-**Component filters:** height > 12 % of ROI height, width < 18 % of ROI width, area > 80 px, aspect ratio < 2.0.
+## 5. Holistic classification (final)
 
-**Reference-image test:** only 2 of 10 parts produced a blob count within ±2 of the expected character count. The other 8 produced too many blobs from residual texture noise.
+Each of the 10 part types has a unique serial number, so the serial number region produces a unique visual pattern even when individual characters cannot be isolated. The whole preprocessed ROI is treated as one image.
 
-**Extracted crops:** 11 labelled 28 × 28 character samples across 7 classes (the parts where segmentation worked). Most crops are visually corrupted — texture noise survives binarisation and contaminates the character shape.
+**Features.** HOG [2] on the grayscale top-hat output (blur, CLAHE, black top-hat, no thresholding), resized to 128×64, with 9 orientations, 8×8 pixel cells, and 2×2 cell blocks. This gives a 3,780-dimensional feature vector per image.
 
-**Diagnosis:** the classifier is not the bottleneck (HOG + KNN reaches 98.9 % CV on clean character data with augmentation). The bottleneck is producing clean crops. **Binarisation is the culprit:** in the grayscale top-hat output, characters are bright and texture is dim. After Otsu, both become white pixels, and connected components can no longer distinguish them.
+**Classifier.** KNN [3]. The 1,872 images are split 80/20 into 1,497 training and 375 test images.
 
-## 5. Holistic classification (FINAL)
+**Manual vs automatic ROI.**
 
-Insight: each of the 10 part types has a *unique* serial number, so its serial-number region has a unique visual fingerprint regardless of whether individual characters are isolable.
-
-**Feature extraction:** HOG [Dalal & Triggs, 2005] with 9 orientations, 8 × 8 pixel cells, 2 × 2 cell blocks, on the 128 × 64 resized **grayscale top-hat** output (no binarisation). 3,780-dimensional feature vector per image.
-
-The critical choice is feeding HOG the grayscale top-hat rather than the binarised version. Grayscale preserves the intensity gap between strong character edges and weak texture edges — exactly what HOG is designed to integrate over.
-
-**Classifier:** k-nearest neighbours, k = 1, Euclidean distance. k = 1 outperforms k = 3 and k = 5 because every test image's nearest neighbour is overwhelmingly likely to be another image of the same part.
-
-**ROI choice — counterintuitive result:**
-
-| ROI | Test accuracy |
-|---|---|
-| Manual (tight) | 89.3 % |
-| Auto MSER (wide) | **96.3 %** |
-
-The wider MSER region captures surrounding casting geometry (screw holes, edges, part contour). For the D0CW parts whose serial numbers differ by one digit, this extra signal is what disambiguates them. The system identifies the part not purely by the serial number but by the *combination* of serial-number region and surrounding context.
-
-## 6. Evaluation
-
-| Protocol | Accuracy | Note |
+| ROI method | Accuracy | Notes |
 |---|---|---|
-| 80/20 stratified split (k = 1) | **96.3 %** | Headline test number |
-| GroupKFold cross-validation (k = 1) | **96.4 % ± 0.6 %** | No image leakage; fairest protocol |
-| KNN k = 3 | 93.9 % | |
-| KNN k = 5 | 92.8 % | |
-| Accuracy excluding the failing class | 97.3 % | Confirms 23477043 is the weakest, not propping up the overall score |
+| Manual ROI (tight) | 89.3% | Only the serial number region |
+| Auto ROI (MSER, wide) | 96.3% | Serial number plus surrounding context |
 
-The small gap between stratified and GroupKFold accuracy indicates the model is genuinely learning part-level visual patterns rather than memorising per-image artefacts.
+The wider detection area captures context around the serial number (screw holes, casting edges, part geometry). The system is therefore partly identifying parts by their surrounding structure rather than purely by the serial number. This makes the classifier more robust, especially for the D0CW parts whose serial numbers differ by a single digit.
 
-## 7. Report-style notes (why this graded 9.7/10)
+## 6. Tools
 
-ENGG\*6100 (Prof. Medhat Moussa) rewards:
+Python, with OpenCV [7] for image processing, scikit-image [8] for HOG, scikit-learn [9] for KNN and evaluation, and Matplotlib for figures.
 
-- Chronological *tried → failed → learned → pivoted* narrative
-- Concrete numbers at every step
-- Comparison tables across approaches (here: Table 5 in the report)
-- Physical reasoning for design choices (top-hat motivated by stamp physics)
-- External references beyond course materials
-- Figures showing each processing stage
-
-The 0.3-point deduction was on Discussion depth — limitations could have been pushed harder, with more external literature cited. This calibration informed subsequent projects.
+Bracketed numbers refer to [references.md](references.md).
