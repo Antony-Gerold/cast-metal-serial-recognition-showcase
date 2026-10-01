@@ -58,7 +58,7 @@ Solution code is kept private in line with course academic-integrity policy. I'm
 
 ## Author
 
-**Antony Gerold Arockiasamy**, ENGG\*6100 Machine Vision, University of Guelph.
+**Antony Gerold Arockiasamy**, MEng Computer Engineering, University of Guelph. ENGG\*6100 Machine Vision.
 
 ## License
 
